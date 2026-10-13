@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Security Hub findings in CloudWatch: metric filters, alarm, composite alarm,
+  and unified dashboard. Companion to the AWS Cloud Operations Blog post
+  "Bring Security Hub Findings into Your CloudWatch On-Call Workflow."
+
+Parameters:
+  FindingsLogGroupName:
+    Type: String
+    Default: /aws/securityhub/findings
+    Description: >
+      Name of the CloudWatch Logs log group where Security Hub findings are
+      delivered. Confirm the actual managed log group name in your environment.
+  ServiceName:
+    Type: String
+    Default: payments-service
+    Description: ECS service name for the application health metric widget.
+  ApiName:
+    Type: String
+    Default: payments-api
+    Description: API Gateway API name for the latency widget.
+  SecurityAlarmSNSTopicArn:
+    Type: String
+    Description: ARN of the SNS topic for security alarm notifications.
+  P1EscalationSNSTopicArn:
+    Type: String
+    Description: ARN of the SNS topic for P1 composite alarm escalation.
+  PerformanceAlarmName:
+    Type: String
+    Default: Payments-Service-CPUUtilization-High
+    Description: Name of your existing performance alarm for composite alarm correlation.
+
+Resources:
+
+  # Metric Filter 1: Count CRITICAL and HIGH findings
+  SecurityFindingMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FindingsLogGroupName
+      FilterPattern: '{ ($.Severity.Label = "CRITICAL") || ($.Severity.Label = "HIGH") }'
+      MetricTransformations:
+        - MetricName: CriticalHighSecurityFindings
+          MetricNamespace: SecurityHub/Operational
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  # Metric Filter 2: CryptoMining findings specifically
+  CryptoMiningMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FindingsLogGroupName
+      FilterPattern: '{ $.Types[0] = "*CryptoCurrency*" }'
+      MetricTransformations:
+        - MetricName: CryptoMiningFindings
+          MetricNamespace: SecurityHub/Operational
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  # Metric Filter 3: Production-scoped CRITICAL findings (tag-filtered)
+  ProductionCriticalFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FindingsLogGroupName
+      FilterPattern: >-
+        { ($.Severity.Label = "CRITICAL")
+        && ($.Resources[0].Tags.Environment = "Production") }
+      MetricTransformations:
+        - MetricName: ProductionCriticalFindings
+          MetricNamespace: SecurityHub/Operational
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  # Alarm: fires when CRITICAL or HIGH findings appear
+  SecurityFindingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecurityHub-CriticalHigh-Findings
+      AlarmDescription: !Sub >
+        CRITICAL or HIGH Security Hub finding detected. Check the unified
+        dashboard for correlation with performance metrics. Do NOT scale or
+        restart until root cause is confirmed.
+        Logs Insights: https://console.aws.amazon.com/cloudwatch/home#logsV2:logs-insights
+      MetricName: CriticalHighSecurityFindings
+      Namespace: SecurityHub/Operational
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SecurityAlarmSNSTopicArn
+
+  # Composite Alarm: security finding AND performance alarm together
+  SecurityPerformanceCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    DependsOn: SecurityFindingAlarm
+    Properties:
+      AlarmName: P1-Security-Performance-Correlation
+      AlarmDescription: >
+        SECURITY + PERFORMANCE correlation detected. A security finding and a
+        performance alarm are active on the same resource simultaneously. This
+        is likely a security incident manifesting as a performance issue.
+        DO NOT scale or restart. Isolate the resource and engage security IR.
+      AlarmRule: !Sub >
+        ALARM("SecurityHub-CriticalHigh-Findings")
+        AND ALARM("${PerformanceAlarmName}")
+      AlarmActions:
+        - !Ref P1EscalationSNSTopicArn
+
+  # Unified Dashboard: application health (top) + security findings (bottom)
+  UnifiedDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: Unified-Security-Operations
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ServiceName", "${ServiceName}"]
+                ],
+                "period": 60,
+                "stat": "Average",
+                "title": "ECS CPU Utilization (%)",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "Latency", "${ApiName}", {"stat": "p99"}]
+                ],
+                "period": 60,
+                "title": "API Latency p99 (ms)",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "query": "SOURCE '${FindingsLogGroupName}'\n| stats count(*) as total by Severity.Label\n| sort total desc",
+                "region": "${AWS::Region}",
+                "title": "Security Findings by Severity",
+                "view": "bar"
+              }
+            },
+            {
+              "type": "log",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter severity in ['CRITICAL','HIGH']\n| sort @timestamp desc\n| limit 10",
+                "region": "${AWS::Region}",
+                "title": "Recent Critical/High Findings",
+                "view": "table"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0, "y": 12, "width": 12, "height": 6,
+              "properties": {
+                "query": "SOURCE '${FindingsLogGroupName}'\n| stats count(*) as total by ProductName\n| sort total desc",
+                "region": "${AWS::Region}",
+                "title": "Findings by Source Service",
+                "view": "pie"
+              }
+            },
+            {
+              "type": "log",
+              "x": 12, "y": 12, "width": 12, "height": 6,
+              "properties": {
+                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Severity.Label in ['CRITICAL','HIGH']\n| stats count() as findings by bin(1h)",
+                "region": "${AWS::Region}",
+                "title": "Critical/High Finding Trend",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }

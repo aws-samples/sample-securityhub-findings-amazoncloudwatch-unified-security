@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudOpsSecurityFindingsReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        "logs:StartQuery",
+        "logs:GetQueryResults",
+        "logs:StopQuery",
+        "logs:GetLogGroupFields",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": [
+        "arn:aws:logs:{region}:{account_id}:log-group:/aws/securityhub/findings:*",
+        "arn:aws:logs:{region}:{account_id}:log-group:/aws/securityhub/findings/*:*"
+      ]
+    }
+  ]
+}

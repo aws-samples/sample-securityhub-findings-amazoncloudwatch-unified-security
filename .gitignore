@@ -1,0 +1,7 @@
+.omni/
+.claude/
+.github/
+.env.omni
+.cursor/
+.kiro/
+.agents/
