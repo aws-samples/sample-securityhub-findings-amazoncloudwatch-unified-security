@@ -1,19 +1,21 @@
-# Logs Insights Queries for Security Hub Findings
+# Logs Insights queries for Security Hub findings
 
 Run these from Log Analytics (the default view under **Logs** in the CloudWatch console). Select the security findings log group, paste the query, set the time range, and choose **Run query**.
 
 Field paths assume the flat ASFF structure delivered by CloudWatch. Validate against your own findings if you ingest differently.
 
+Security Hub re-delivers a finding on every update, so each query filters on `Workflow.Status = "NEW"` and `RecordState = "ACTIVE"` to count new active findings rather than every re-delivery. Drop those two clauses if you want the full history of a finding, including its updates.
+
 ## Recent critical findings by resource
 
 ```
 fields @timestamp, Severity.Label as severity, ProductName, Resources.0.Id as resource, Title
-| filter severity in ["CRITICAL", "HIGH"]
+| filter severity in ["CRITICAL", "HIGH"] and Workflow.Status = "NEW" and RecordState = "ACTIVE"
 | sort @timestamp desc
 | limit 25
 ```
 
-Use this when an alarm fires and you need immediate context: which resources have active critical findings, who detected them, and what the finding says.
+Use this when an alarm fires and you need immediate context: which resources have active critical findings, which service detected them, and what each finding says.
 
 ## Findings on a specific resource during an incident
 
@@ -24,55 +26,50 @@ fields @timestamp, Severity.Label as severity, Types.0 as findingType, Title
 | limit 50
 ```
 
-Replace `i-0abc123` with the actual resource identifier from the alarm. This gives you the full finding history for the resource under investigation.
+Replace `i-0abc123` with the actual resource identifier from the alarm. This returns the full finding history for the resource under investigation, including updates, so it is intentionally not filtered to NEW. This is the query behind Pattern 2 (security context as first triage step) and Step 1 of the decision tree.
 
 ## Finding volume by source (last 24 hours)
 
 ```
-stats count(*) as findingCount by ProductName, Severity.Label
+filter Workflow.Status = "NEW" and RecordState = "ACTIVE"
+| stats count(*) as findingCount by ProductName, Severity.Label
 | sort findingCount desc
 ```
 
-Shows which services are generating findings and at what severity. Useful for tuning: if one source dominates, investigate whether it needs scoping or suppression at the Security Hub level.
+Shows which services are generating new findings and at what severity. Useful for tuning: if one source dominates, investigate whether it needs scoping or suppression at the Security Hub level.
 
 ## Compliance failures grouped by resource type
 
 ```
 fields @timestamp, Resources.0.Type as resourceType, Resources.0.Id as resource, Title
-| filter Compliance.Status = "FAILED"
+| filter Compliance.Status = "FAILED" and RecordState = "ACTIVE"
 | stats count(*) as failures by resourceType
 | sort failures desc
 ```
 
-Surfaces which resource types have the most compliance failures, helping prioritize remediation by category rather than chasing individual findings.
+Surfaces which resource types have the most active compliance failures, so you can prioritize remediation by category rather than chasing individual findings.
 
 ## Dashboard widget queries
 
-The four queries below power the unified dashboard widgets defined in `templates/security-hub-cloudwatch.yaml`:
+The three Logs Insights queries below power the log widgets in the unified dashboard defined in `templates/security-hub-cloudwatch.yaml`. The dashboard's fourth widget is a metric widget that overlays the per-resource finding metric on the CPU graph, not a Logs Insights query.
 
 **Findings by severity (bar chart):**
 ```
-stats count(*) as total by Severity.Label
+filter Workflow.Status = "NEW" and RecordState = "ACTIVE"
+| stats count(*) as total by Severity.Label
 | sort total desc
 ```
 
-**Findings by source service (pie chart):**
-```
-stats count(*) as total by ProductName
-| sort total desc
-```
-
-**Recent critical/high findings (table):**
+**Recent new critical/high findings (table):**
 ```
 fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource
-| filter severity in ["CRITICAL", "HIGH"]
+| filter severity in ["CRITICAL", "HIGH"] and Workflow.Status = "NEW" and RecordState = "ACTIVE"
 | sort @timestamp desc
 | limit 10
 ```
 
-**Finding trend, last 7 days (time series):**
+**Critical/high finding trend (time series):**
 ```
-fields @timestamp
-| filter Severity.Label in ["CRITICAL", "HIGH"]
+filter Severity.Label in ["CRITICAL", "HIGH"] and Workflow.Status = "NEW" and RecordState = "ACTIVE"
 | stats count() as findings by bin(1h)
 ```

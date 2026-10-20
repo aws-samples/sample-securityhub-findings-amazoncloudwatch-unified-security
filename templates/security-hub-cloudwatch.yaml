@@ -1,56 +1,147 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Security Hub findings in CloudWatch: metric filters, alarm, composite alarm,
-  and unified dashboard. Companion to the AWS Cloud Operations Blog post
-  "Bring Security Hub Findings into Your CloudWatch On-Call Workflow."
+  Security Hub CSPM findings in CloudWatch: per-resource metric filter, alarms,
+  composite alarm, and unified dashboard. Companion to the AWS Cloud Operations
+  Blog post "Bring Security Hub findings into your CloudWatch on-call workflow."
+
+  Account and Region placement: a composite alarm and its child alarms must all
+  live in the same account and Region. This template therefore creates the
+  security-finding alarm, the performance alarm, and the composite alarm together
+  in one account: the workload account where the monitored resource runs and its
+  findings are delivered. If you centralize findings in a separate observability
+  account, replicate both the finding metric and the performance metric into that
+  account and deploy this stack there instead. See the README for the two options.
 
 Parameters:
   FindingsLogGroupName:
     Type: String
     Default: /aws/securityhub/findings
     Description: >
-      Name of the CloudWatch Logs log group where Security Hub findings are
-      delivered. Confirm the actual managed log group name in your environment.
-  ServiceName:
+      Name of the CloudWatch Logs log group where Security Hub CSPM findings are
+      delivered. The managed log group name is set by the telemetry enablement
+      rule; confirm the actual name in your CloudWatch console before deploying.
+  MonitoredResourceArn:
     Type: String
-    Default: payments-service
-    Description: ECS service name for the application health metric widget.
-  ApiName:
+    Description: >
+      The ASFF resource identifier to correlate on, exactly as it appears in the
+      finding's Resources[0].Id field (for an EC2 instance this is the full ARN,
+      for example arn:aws:ec2:us-east-1:111122223333:instance/i-0abc123). This is
+      the dimension value for the security-finding metric.
+  MonitoredInstanceId:
     Type: String
-    Default: payments-api
-    Description: API Gateway API name for the latency widget.
-  SecurityAlarmSNSTopicArn:
-    Type: String
-    Description: ARN of the SNS topic for security alarm notifications.
+    Description: >
+      The same resource in the form the performance metric uses. For EC2 CPU this
+      is the short instance ID (for example i-0abc123). ASFF keys the resource by
+      ARN while the AWS/EC2 namespace keys it by InstanceId, so both forms are
+      taken as parameters and must refer to the same instance.
+  CpuThreshold:
+    Type: Number
+    Default: 90
+    Description: CPU utilization percent that trips the performance alarm.
   P1EscalationSNSTopicArn:
     Type: String
-    Description: ARN of the SNS topic for P1 composite alarm escalation.
-  PerformanceAlarmName:
-    Type: String
-    Default: Payments-Service-CPUUtilization-High
-    Description: Name of your existing performance alarm for composite alarm correlation.
+    Description: >
+      ARN of the SNS topic for the composite (P1) escalation. Must be in the same
+      Region as this stack.
 
 Resources:
 
-  # Metric Filter 1: Count CRITICAL and HIGH findings
+  # Metric filter: CRITICAL/HIGH finding EVENTS, per resource.
+  # - Workflow.Status = NEW and RecordState = ACTIVE exclude re-delivered updates,
+  #   so the metric counts new active findings rather than every finding update.
+  # - Dimensions emit one metric per distinct resource (ResourceId), which is what
+  #   lets a per-resource alarm exist. NOTE: a metric filter with Dimensions cannot
+  #   also set DefaultValue, so this metric reports only when a matching finding
+  #   arrives; the alarm below uses TreatMissingData: notBreaching to handle gaps.
+  # - One custom metric is published per distinct ResourceId. ResourceId (an ARN)
+  #   is high-cardinality: CloudWatch Logs disables a metric filter that generates
+  #   more than 1,000 distinct dimension name/value pairs in a short window, and
+  #   each distinct value bills as a separate custom metric. Scope this filter to
+  #   the specific production resources you page on, not every resource that can
+  #   produce a finding.
   SecurityFindingMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref FindingsLogGroupName
-      FilterPattern: '{ ($.Severity.Label = "CRITICAL") || ($.Severity.Label = "HIGH") }'
+      FilterPattern: >-
+        { ($.Severity.Label = "CRITICAL" || $.Severity.Label = "HIGH")
+        && $.Workflow.Status = "NEW"
+        && $.RecordState = "ACTIVE" }
       MetricTransformations:
         - MetricName: CriticalHighSecurityFindings
           MetricNamespace: SecurityHub/Operational
           MetricValue: "1"
-          DefaultValue: 0
           Unit: Count
+          Dimensions:
+            - Key: ResourceId
+              Value: $.Resources[0].Id
 
-  # Metric Filter 2: CryptoMining findings specifically
+  # Security-finding alarm, scoped to ONE resource via the ResourceId dimension.
+  SecurityFindingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "SecurityHub-CriticalHigh-${MonitoredInstanceId}"
+      AlarmDescription: >-
+        CRITICAL or HIGH Security Hub CSPM finding on this resource. Confirm the
+        finding in the triage query before acting. Do not scale or restart until
+        root cause is understood.
+      Namespace: SecurityHub/Operational
+      MetricName: CriticalHighSecurityFindings
+      Dimensions:
+        - Name: ResourceId
+          Value: !Ref MonitoredResourceArn
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # Performance alarm on the SAME resource (EC2 CPU here), same account and Region.
+  PerformanceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "EC2-CPUHigh-${MonitoredInstanceId}"
+      AlarmDescription: CPU utilization high on the monitored instance.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref MonitoredInstanceId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref CpuThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # Composite alarm: fires only when BOTH per-resource child alarms are in ALARM.
+  # Children are referenced by name; all three alarms are co-located in this
+  # account and Region, which is what makes the "same resource" correlation real.
+  SecurityPerformanceCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "P1-SecPerf-${MonitoredInstanceId}"
+      AlarmDescription: >-
+        Security finding and performance alarm are both active on the same
+        resource. Likely a security incident surfacing as a performance issue.
+        Do not scale or restart. Isolate the resource and engage security incident
+        response per your IR runbook.
+      AlarmRule: !Sub 'ALARM("${SecurityFindingAlarm}") AND ALARM("${PerformanceAlarm}")'
+      AlarmActions:
+        - !Ref P1EscalationSNSTopicArn
+
+  # Additional metric filters (account-wide, for dashboards and tuning, not the
+  # per-resource composite). These count finding events (NEW/ACTIVE) without a
+  # resource dimension, so they keep a DefaultValue for steady reporting.
   CryptoMiningMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref FindingsLogGroupName
-      FilterPattern: '{ $.Types[0] = "*CryptoCurrency*" }'
+      FilterPattern: >-
+        { $.Types[0] = "*CryptoCurrency*"
+        && $.Workflow.Status = "NEW"
+        && $.RecordState = "ACTIVE" }
       MetricTransformations:
         - MetricName: CryptoMiningFindings
           MetricNamespace: SecurityHub/Operational
@@ -58,14 +149,15 @@ Resources:
           DefaultValue: 0
           Unit: Count
 
-  # Metric Filter 3: Production-scoped CRITICAL findings (tag-filtered)
   ProductionCriticalFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref FindingsLogGroupName
       FilterPattern: >-
         { ($.Severity.Label = "CRITICAL")
-        && ($.Resources[0].Tags.Environment = "Production") }
+        && ($.Resources[0].Tags.Environment = "Production")
+        && $.Workflow.Status = "NEW"
+        && $.RecordState = "ACTIVE" }
       MetricTransformations:
         - MetricName: ProductionCriticalFindings
           MetricNamespace: SecurityHub/Operational
@@ -73,45 +165,10 @@ Resources:
           DefaultValue: 0
           Unit: Count
 
-  # Alarm: fires when CRITICAL or HIGH findings appear
-  SecurityFindingAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: SecurityHub-CriticalHigh-Findings
-      AlarmDescription: !Sub >
-        CRITICAL or HIGH Security Hub finding detected. Check the unified
-        dashboard for correlation with performance metrics. Do NOT scale or
-        restart until root cause is confirmed.
-        Logs Insights: https://console.aws.amazon.com/cloudwatch/home#logsV2:logs-insights
-      MetricName: CriticalHighSecurityFindings
-      Namespace: SecurityHub/Operational
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
-      AlarmActions:
-        - !Ref SecurityAlarmSNSTopicArn
-
-  # Composite Alarm: security finding AND performance alarm together
-  SecurityPerformanceCompositeAlarm:
-    Type: AWS::CloudWatch::CompositeAlarm
-    DependsOn: SecurityFindingAlarm
-    Properties:
-      AlarmName: P1-Security-Performance-Correlation
-      AlarmDescription: >
-        SECURITY + PERFORMANCE correlation detected. A security finding and a
-        performance alarm are active on the same resource simultaneously. This
-        is likely a security incident manifesting as a performance issue.
-        DO NOT scale or restart. Isolate the resource and engage security IR.
-      AlarmRule: !Sub >
-        ALARM("SecurityHub-CriticalHigh-Findings")
-        AND ALARM("${PerformanceAlarmName}")
-      AlarmActions:
-        - !Ref P1EscalationSNSTopicArn
-
-  # Unified Dashboard: application health (top) + security findings (bottom)
+  # Unified dashboard: application health (top) and security findings (bottom).
+  # The CPU widget overlays the per-resource finding metric on the right Y axis so
+  # a finding shows up on the same graph as the CPU line, rather than relying on
+  # static vertical annotations.
   UnifiedDashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
@@ -124,33 +181,33 @@ Resources:
               "x": 0, "y": 0, "width": 12, "height": 6,
               "properties": {
                 "metrics": [
-                  ["AWS/ECS", "CPUUtilization", "ServiceName", "${ServiceName}"]
+                  [ "AWS/EC2", "CPUUtilization", "InstanceId", "${MonitoredInstanceId}", { "yAxis": "left" } ],
+                  [ "SecurityHub/Operational", "CriticalHighSecurityFindings", "ResourceId", "${MonitoredResourceArn}", { "yAxis": "right", "stat": "Sum" } ]
                 ],
                 "period": 60,
                 "stat": "Average",
-                "title": "ECS CPU Utilization (%)",
-                "region": "${AWS::Region}"
+                "title": "CPU and security findings (same instance)",
+                "region": "${AWS::Region}",
+                "yAxis": { "left": { "label": "CPU %" }, "right": { "label": "Findings" } }
               }
             },
             {
-              "type": "metric",
+              "type": "log",
               "x": 12, "y": 0, "width": 12, "height": 6,
               "properties": {
-                "metrics": [
-                  ["AWS/ApiGateway", "Latency", "${ApiName}", {"stat": "p99"}]
-                ],
-                "period": 60,
-                "title": "API Latency p99 (ms)",
-                "region": "${AWS::Region}"
+                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter severity in ['CRITICAL','HIGH'] and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| sort @timestamp desc\n| limit 10",
+                "region": "${AWS::Region}",
+                "title": "Recent new critical/high findings",
+                "view": "table"
               }
             },
             {
               "type": "log",
               "x": 0, "y": 6, "width": 12, "height": 6,
               "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| stats count(*) as total by Severity.Label\n| sort total desc",
+                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| stats count(*) as total by Severity.Label\n| sort total desc",
                 "region": "${AWS::Region}",
-                "title": "Security Findings by Severity",
+                "title": "Findings by severity",
                 "view": "bar"
               }
             },
@@ -158,29 +215,9 @@ Resources:
               "type": "log",
               "x": 12, "y": 6, "width": 12, "height": 6,
               "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter severity in ['CRITICAL','HIGH']\n| sort @timestamp desc\n| limit 10",
+                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Severity.Label in ['CRITICAL','HIGH'] and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| stats count() as findings by bin(1h)",
                 "region": "${AWS::Region}",
-                "title": "Recent Critical/High Findings",
-                "view": "table"
-              }
-            },
-            {
-              "type": "log",
-              "x": 0, "y": 12, "width": 12, "height": 6,
-              "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| stats count(*) as total by ProductName\n| sort total desc",
-                "region": "${AWS::Region}",
-                "title": "Findings by Source Service",
-                "view": "pie"
-              }
-            },
-            {
-              "type": "log",
-              "x": 12, "y": 12, "width": 12, "height": 6,
-              "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Severity.Label in ['CRITICAL','HIGH']\n| stats count() as findings by bin(1h)",
-                "region": "${AWS::Region}",
-                "title": "Critical/High Finding Trend",
+                "title": "Critical/high finding trend",
                 "view": "timeSeries"
               }
             }
