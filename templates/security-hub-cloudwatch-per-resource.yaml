@@ -1,16 +1,27 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Security Hub CSPM findings in CloudWatch: per-resource metric filter, alarms,
-  composite alarm, and unified dashboard. Companion to the AWS Cloud Operations
-  Blog post "Bring Security Hub findings into your CloudWatch on-call workflow."
+  Security Hub CSPM findings in CloudWatch: PER-RESOURCE stack. Companion to the
+  AWS Cloud Operations Blog post "Bring Security Hub findings into your CloudWatch
+  on-call workflow."
+
+  Deploy this stack once for EACH resource you page on. It creates the
+  per-resource finding metric filter, the security-finding alarm, the performance
+  alarm, the composite alarm, and a correlation dashboard whose name includes the
+  instance ID so repeat deployments do not collide. Deploy the foundation stack
+  (security-hub-cloudwatch-foundation.yaml) once per account and Region first for
+  the account-wide filters and overview dashboard.
 
   Account and Region placement: a composite alarm and its child alarms must all
-  live in the same account and Region. This template therefore creates the
-  security-finding alarm, the performance alarm, and the composite alarm together
-  in one account: the workload account where the monitored resource runs and its
-  findings are delivered. If you centralize findings in a separate observability
-  account, replicate both the finding metric and the performance metric into that
-  account and deploy this stack there instead. See the README for the two options.
+  live in the same account and Region. This template creates the security-finding
+  alarm, the performance alarm, and the composite alarm together in the workload
+  account where the monitored resource runs and its findings are delivered. If you
+  centralize findings in a separate observability account, note that CloudWatch
+  metrics centralization replicates custom, EMF, and OTLP metrics but NOT AWS
+  vended metrics such as AWS/EC2 CPUUtilization, and it rewrites centralized
+  metrics with the :@aws.account and :@aws.region dimensions. To run the composite
+  in that account you must first republish the performance metric there as a
+  custom metric and account for the added dimensions. The finding metric (a
+  metric-filter custom metric) does centralize. See the README for both options.
 
 Parameters:
   FindingsLogGroupName:
@@ -46,27 +57,30 @@ Parameters:
 
 Resources:
 
-  # Metric filter: CRITICAL/HIGH finding EVENTS, per resource.
-  # - Workflow.Status = NEW and RecordState = ACTIVE exclude re-delivered updates,
-  #   so the metric counts new active findings rather than every finding update.
+  # Metric filter: CRITICAL/HIGH finding EVENTS, scoped to ONE resource.
+  # - Workflow.Status = NEW and RecordState = ACTIVE keep only active, untriaged
+  #   finding events. A finding updated while still NEW is still re-delivered and
+  #   still matches, which is intended: the alarm should keep firing while the
+  #   finding is active and untriaged.
   # - Dimensions emit one metric per distinct resource (ResourceId), which is what
   #   lets a per-resource alarm exist. NOTE: a metric filter with Dimensions cannot
   #   also set DefaultValue, so this metric reports only when a matching finding
   #   arrives; the alarm below uses TreatMissingData: notBreaching to handle gaps.
-  # - One custom metric is published per distinct ResourceId. ResourceId (an ARN)
-  #   is high-cardinality: CloudWatch Logs disables a metric filter that generates
-  #   more than 1,000 distinct dimension name/value pairs in a short window, and
-  #   each distinct value bills as a separate custom metric. Scope this filter to
-  #   the specific production resources you page on, not every resource that can
-  #   produce a finding.
+  # - The filter pattern is scoped to the single MonitoredResourceArn, so it emits
+  #   exactly one metric (ResourceId = the monitored ARN). This keeps it well under
+  #   the CloudWatch Logs limit that disables a metric filter after 1,000 distinct
+  #   dimension name/value pairs, and it bills as a single custom metric. Deploy one
+  #   stack per resource you want to page on. Do not widen the pattern to all
+  #   resources, which would reintroduce the high-cardinality self-disable risk.
   SecurityFindingMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref FindingsLogGroupName
-      FilterPattern: >-
+      FilterPattern: !Sub >-
         { ($.Severity.Label = "CRITICAL" || $.Severity.Label = "HIGH")
         && $.Workflow.Status = "NEW"
-        && $.RecordState = "ACTIVE" }
+        && $.RecordState = "ACTIVE"
+        && $.Resources[0].Id = "${MonitoredResourceArn}" }
       MetricTransformations:
         - MetricName: CriticalHighSecurityFindings
           MetricNamespace: SecurityHub/Operational
@@ -77,6 +91,12 @@ Resources:
               Value: $.Resources[0].Id
 
   # Security-finding alarm, scoped to ONE resource via the ResourceId dimension.
+  # Window: the dimensioned metric only reports when a matching finding arrives,
+  # then stops. A security finding often precedes the performance symptom by many
+  # minutes, so the alarm holds ALARM for a lookback window (EvaluationPeriods 12 x
+  # 300s = 60 minutes, DatapointsToAlarm 1) after the last matching finding. That
+  # keeps it in ALARM long enough to overlap a later performance alarm, and matches
+  # the "last 60 minutes" in Step 1 of the decision tree.
   SecurityFindingAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -92,7 +112,8 @@ Resources:
           Value: !Ref MonitoredResourceArn
       Statistic: Sum
       Period: 300
-      EvaluationPeriods: 1
+      EvaluationPeriods: 12
+      DatapointsToAlarm: 1
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
@@ -130,55 +151,40 @@ Resources:
       AlarmRule: !Sub 'ALARM("${SecurityFindingAlarm}") AND ALARM("${PerformanceAlarm}")'
       AlarmActions:
         - !Ref P1EscalationSNSTopicArn
+      # OPTIONAL enhancement (CloudWatch alarm tags in action payloads, launched
+      # October 2026). Tag the alarm, then propagate those tags into the SNS
+      # payload so the on-call tooling can route or filter on team, environment,
+      # or severity without a second lookup. Tags propagate only to SNS, Lambda,
+      # and EventBridge targets, which is what this composite escalates to.
+      # Enabling this requires the cloudwatch:ListTagsForResource permission on the
+      # principal that creates or updates the alarm. Uncomment to use.
+      # Tags:
+      #   - Key: team
+      #     Value: cloudops-oncall
+      #   - Key: environment
+      #     Value: production
+      #   - Key: severity
+      #     Value: P1
+      # ActionConfiguration:
+      #   AlarmTagsPropagation:
+      #     Enabled: true
 
-  # Additional metric filters (account-wide, for dashboards and tuning, not the
-  # per-resource composite). These count finding events (NEW/ACTIVE) without a
-  # resource dimension, so they keep a DefaultValue for steady reporting.
-  CryptoMiningMetricFilter:
-    Type: AWS::Logs::MetricFilter
-    Properties:
-      LogGroupName: !Ref FindingsLogGroupName
-      FilterPattern: >-
-        { $.Types[0] = "*CryptoCurrency*"
-        && $.Workflow.Status = "NEW"
-        && $.RecordState = "ACTIVE" }
-      MetricTransformations:
-        - MetricName: CryptoMiningFindings
-          MetricNamespace: SecurityHub/Operational
-          MetricValue: "1"
-          DefaultValue: 0
-          Unit: Count
-
-  ProductionCriticalFilter:
-    Type: AWS::Logs::MetricFilter
-    Properties:
-      LogGroupName: !Ref FindingsLogGroupName
-      FilterPattern: >-
-        { ($.Severity.Label = "CRITICAL")
-        && ($.Resources[0].Tags.Environment = "Production")
-        && $.Workflow.Status = "NEW"
-        && $.RecordState = "ACTIVE" }
-      MetricTransformations:
-        - MetricName: ProductionCriticalFindings
-          MetricNamespace: SecurityHub/Operational
-          MetricValue: "1"
-          DefaultValue: 0
-          Unit: Count
-
-  # Unified dashboard: application health (top) and security findings (bottom).
-  # The CPU widget overlays the per-resource finding metric on the right Y axis so
-  # a finding shows up on the same graph as the CPU line, rather than relying on
-  # static vertical annotations.
-  UnifiedDashboard:
+  # Per-resource correlation dashboard. The CPU widget overlays this resource's
+  # finding metric on the right Y axis so a finding shows up on the same graph as
+  # the CPU line, rather than relying on static vertical annotations. The name
+  # includes the instance ID so each per-resource deployment creates its own
+  # dashboard instead of colliding on a shared name. The account-wide findings
+  # views live on the Security-Findings-Overview dashboard in the foundation stack.
+  CorrelationDashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
-      DashboardName: Unified-Security-Operations
+      DashboardName: !Sub "Unified-Security-Operations-${MonitoredInstanceId}"
       DashboardBody: !Sub |
         {
           "widgets": [
             {
               "type": "metric",
-              "x": 0, "y": 0, "width": 12, "height": 6,
+              "x": 0, "y": 0, "width": 24, "height": 6,
               "properties": {
                 "metrics": [
                   [ "AWS/EC2", "CPUUtilization", "InstanceId", "${MonitoredInstanceId}", { "yAxis": "left" } ],
@@ -193,32 +199,12 @@ Resources:
             },
             {
               "type": "log",
-              "x": 12, "y": 0, "width": 12, "height": 6,
+              "x": 0, "y": 6, "width": 24, "height": 6,
               "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter severity in ['CRITICAL','HIGH'] and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| sort @timestamp desc\n| limit 10",
+                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter resource = '${MonitoredResourceArn}' and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| sort @timestamp desc\n| limit 10",
                 "region": "${AWS::Region}",
-                "title": "Recent new critical/high findings",
+                "title": "New critical/high findings on this resource",
                 "view": "table"
-              }
-            },
-            {
-              "type": "log",
-              "x": 0, "y": 6, "width": 12, "height": 6,
-              "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| stats count(*) as total by Severity.Label\n| sort total desc",
-                "region": "${AWS::Region}",
-                "title": "Findings by severity",
-                "view": "bar"
-              }
-            },
-            {
-              "type": "log",
-              "x": 12, "y": 6, "width": 12, "height": 6,
-              "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Severity.Label in ['CRITICAL','HIGH'] and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| stats count() as findings by bin(1h)",
-                "region": "${AWS::Region}",
-                "title": "Critical/high finding trend",
-                "view": "timeSeries"
               }
             }
           ]

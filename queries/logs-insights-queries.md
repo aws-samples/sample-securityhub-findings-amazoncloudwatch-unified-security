@@ -4,7 +4,7 @@ Run these from Log Analytics (the default view under **Logs** in the CloudWatch 
 
 Field paths assume the flat ASFF structure delivered by CloudWatch. Validate against your own findings if you ingest differently.
 
-Security Hub re-delivers a finding on every update, so each query filters on `Workflow.Status = "NEW"` and `RecordState = "ACTIVE"` to count new active findings rather than every re-delivery. Drop those two clauses if you want the full history of a finding, including its updates.
+Security Hub re-delivers a finding on every update, so each query filters on `Workflow.Status = "NEW"` and `RecordState = "ACTIVE"` to count active, untriaged finding events. A finding updated while still NEW is still re-delivered and still matches; the filter excludes findings that have been resolved, suppressed, or already triaged. Drop those two clauses if you want the full history of a finding, including its updates.
 
 ## Recent critical findings by resource
 
@@ -51,7 +51,7 @@ Surfaces which resource types have the most active compliance failures, so you c
 
 ## Dashboard widget queries
 
-The three Logs Insights queries below power the log widgets in the unified dashboard defined in `templates/security-hub-cloudwatch.yaml`. The dashboard's fourth widget is a metric widget that overlays the per-resource finding metric on the CPU graph, not a Logs Insights query.
+The three Logs Insights queries below power the log widgets in the Security-Findings-Overview dashboard defined in `templates/security-hub-cloudwatch-foundation.yaml`. The per-resource correlation dashboard in `templates/security-hub-cloudwatch-per-resource.yaml` adds a metric widget that overlays the per-resource finding metric on the CPU graph (not a Logs Insights query) and a resource-scoped version of the recent-findings table.
 
 **Findings by severity (bar chart):**
 ```

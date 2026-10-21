@@ -1,4 +1,4 @@
-# Bring Security Hub findings into your CloudWatch on-call workflow
+# Bring Security Hub Findings into Your CloudWatch On-Call Workflow
 
 Companion resources for the AWS Cloud Operations Blog post. This repository contains the CloudFormation templates, IAM policies, Logs Insights queries, and console walkthroughs referenced in the blog.
 
@@ -6,18 +6,28 @@ Companion resources for the AWS Cloud Operations Blog post. This repository cont
 
 ```
 templates/
-  security-hub-cloudwatch.yaml    Full CloudFormation: metric filters, alarm, composite alarm, dashboard
-  iam-cloudops-read-only.json     Read-only IAM policy for CloudOps engineers
+  security-hub-cloudwatch-foundation.yaml      Deploy once per account/Region: account-wide metric filters and overview dashboard
+  security-hub-cloudwatch-per-resource.yaml    Deploy once per monitored resource: per-resource filter, alarms, composite alarm, correlation dashboard
+  iam-cloudops-read-only.json                  Read-only IAM policy for CloudOps engineers
 queries/
   logs-insights-queries.md        Logs Insights queries for incident investigation and dashboards
 LICENSE                           MIT-0 license
 ```
 
+The CloudFormation is split into two stacks so you can run more than one monitored
+resource without collisions. The foundation stack holds the account-wide pieces
+that can exist only once per account and Region (the crypto-mining and
+production-critical filters, and the Security-Findings-Overview dashboard). The
+per-resource stack holds everything keyed to a single resource (the scoped metric
+filter, the security-finding alarm, the performance alarm, the composite alarm,
+and a correlation dashboard named per instance). Deploy the foundation once, then
+the per-resource stack once for each resource you page on.
+
 ## Prerequisites
 
 - AWS Security Hub CSPM enabled in your account or organization
 - A CloudWatch telemetry enablement rule for Security Hub CSPM configured (see the setup walkthrough below)
-- The ASFF resource identifier for the resource you want to correlate on, exactly as it appears in the finding's `Resources[0].Id` field, and the short EC2 instance ID of that same resource. Both values must point at the same resource; the template creates the performance alarm for you, so you do not need one to already exist.
+- An existing performance alarm on the workload you want to correlate with security findings
 
 ## Console walkthroughs
 
@@ -41,10 +51,16 @@ For organizations that want to centralize findings in a single observability acc
 1. From the organization management or delegated administrator account, open the CloudWatch console and choose **Ingestion**, then the centralization configuration for logs.
 2. Create a centralization rule and set the destination account and primary destination Region.
 3. Scope the rule to the entire organization, specific OUs, or individual accounts, and use log group LIKE / NOT LIKE patterns to include the security findings log groups.
-4. (Optional) Configure a backup Region and a customer managed KMS key for the destination log groups.
-5. Create the rule. CloudWatch replicates matching log data into the destination account and begins publishing centralization metrics (for example, IncomingCopiedLogEvents) so you can confirm delivery.
+4. Enable **Metrics** in the same centralization rule, not just Logs. The composite alarm correlates the security-finding metric with the performance metric, so both metrics have to exist in the destination account. Metrics and Logs are separate toggles on the rule; a logs-only rule centralizes the findings log group but not the metrics the alarms read.
+5. (Optional) Configure a backup Region and a customer managed KMS key for the destination log groups.
+6. Create the rule. CloudWatch replicates matching log data into the destination account and begins publishing centralization metrics (for example, IncomingCopiedLogEvents) so you can confirm delivery.
 
 Because centralization physically replicates the data, alarms, metric filters, and dashboards in the destination account operate on local data with no cross-account query federation.
+
+Two things to confirm before you rely on the centralized copies:
+
+- **Not every metric centralizes.** CloudWatch metrics centralization supports custom, Embedded Metric Format (EMF), and OpenTelemetry (OTLP) metrics. AWS vended metrics such as `AWS/EC2` `CPUUtilization` are not centralized. The security-finding metric in this template is a metric-filter custom metric, so it does centralize; the EC2 CPU metric does not. To run the composite in the destination account, publish the performance signal there as a custom metric (for example with the CloudWatch agent, which emits CPU under the `CWAgent` namespace) rather than relying on the vended `AWS/EC2` metric.
+- **Centralized metrics gain extra dimensions.** Centralized copies carry added `:@aws.account` and `:@aws.region` dimensions that identify the source account and Region. An alarm written against the workload-account dimensions will not match the centralized copy unless you account for these, so test the alarm dimensions against the centralized metrics before you depend on them.
 
 ### Creating a metric filter
 
@@ -53,74 +69,79 @@ Create the same filter once, then repeat for the additional filters in the Cloud
 1. Open the CloudWatch console and choose **Logs**, then **Log groups**.
 2. Choose the security findings log group that your enablement rule delivers to.
 3. Choose **Actions**, then **Create metric filter**.
-4. For **Filter pattern**, enter the per-resource pattern from the template:
-   `{ ($.Severity.Label = "CRITICAL" || $.Severity.Label = "HIGH") && $.Workflow.Status = "NEW" && $.RecordState = "ACTIVE" }`. Use **Test pattern** with a sample finding to confirm it matches.
+4. For **Filter pattern**, enter the pattern from the template (for example, `{ ($.Severity.Label = "CRITICAL") || ($.Severity.Label = "HIGH") }`). Use **Test pattern** with a sample finding to confirm it matches.
 5. Choose **Next**, then enter a Filter name.
-6. Under **Metric details**, set Metric namespace (for example, SecurityHub/Operational), Metric name, a Metric value of 1, and a dimension of `ResourceId` with value `$.Resources[0].Id` so one metric is published per distinct resource. A dimensioned metric filter cannot also set a default value, so the metric only reports when a matching finding arrives; the alarm compensates with `TreatMissingData: notBreaching`.
+6. Under **Metric details**, set Metric namespace (for example, SecurityHub/Operational), Metric name, and a Metric value of 1 so the metric increments once per matching finding.
 7. (Optional) If you query centralized log groups, use Filter selection criteria to scope by source account or Region.
 8. Choose **Next**, review, and choose **Create metric filter**. The metric appears once matching findings arrive.
 
-`ResourceId` is an ARN, which makes it high-cardinality: CloudWatch Logs disables a metric filter once it generates more than 1,000 distinct dimension name and value pairs in a short window, and each distinct value bills as a separate custom metric. Scope this filter to the specific production resources you page on, not every resource that can produce a finding.
+#### A note on the CryptoMining filter
+
+The account-wide `CryptoMiningMetricFilter` in `templates/security-hub-cloudwatch-foundation.yaml` matches GuardDuty cryptocurrency findings as they appear after the GuardDuty to Security Hub CSPM mapping. GuardDuty's native finding type is rewritten into the ASFF `Types` array, so the value in the log event reads like `TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B`. A single `*CryptoCurrency*` test catches the BitcoinTool findings but misses `CryptoMiner` and `BitcoinDomainRequest`, which do not carry that literal substring, so the pattern matches both `*Crypto*` and `*Bitcoin*` on `Types[0]` to cover the whole family.
+
+This pattern is verified against the published GuardDuty-to-ASFF finding-type mapping, not against a live finding. Before you publish or depend on it, generate GuardDuty sample findings (GuardDuty console, **Settings**, **Generate sample findings**), let them flow through the enablement rule into the findings log group, and use **Test pattern** on the metric filter to confirm the crypto findings match. `Types[0]` assumes the crypto finding type is the first element of the `Types` array, which holds for these GuardDuty findings but is worth reconfirming against your own sample.
 
 ### Creating the composite alarm
 
-The template creates the security-finding alarm, the performance alarm, and the composite alarm together, in the same account and Region. A composite alarm requires its child alarms to be co-located with it, so there is no console step to link a pre-existing performance alarm; deploying the stack creates all three as a set. If you prefer to build this by hand instead of deploying the template:
-
-1. Ensure both child alarms exist in the same account and Region as each other: the security-finding metric alarm and the performance alarm on the same resource.
+1. Ensure both child alarms already exist: the security-finding metric alarm and your existing performance alarm on the same resource.
 2. Open the CloudWatch console and choose **Alarms**, then **All alarms**.
 3. Select the check box next to both child alarms, then choose **Create composite alarm**.
 4. Under **Specify composite alarm conditions**, set the rule expression to require both: `ALARM(SecurityFindingAlarm) AND ALARM(PerformanceAlarm)`. Change the default OR operator to AND.
-5. Choose **Next**, then under **Configure actions** select the SNS topic used for P1 escalation.
+5. Choose **Next**, then under **Configure actions** select the same SNS topic your performance alarms already use, so the notification lands in the existing on-call path.
 6. Enter a name and description (include what to do and what not to do), then create the alarm.
 
-### Correlating findings with the CPU graph
+### Adding a vertical annotation to a metric widget
 
-The dashboard overlays the per-resource finding metric on the CPU graph's right Y axis, instead of relying on a static vertical annotation. A finding lands on the same timeline as CPU as soon as the metric reports, so the overlay stays current with no extra automation and works for any number of findings, not just the one that happened to be present when an annotation was added.
+The annotation is a property of the metric widget itself, so you add it to the widget JSON rather than creating a separate resource:
+
+1. Open the dashboard, choose the CPU (or other performance) widget, and choose **Edit**.
+2. Switch to the **Source** view to see the widget JSON.
+3. Inside `properties`, add an `annotations` object with a `vertical` array, then add an entry with the finding timestamp as `value`, a `label`, a `color`, and `fill` set to `after`.
+4. Choose **Update widget**, then **Save dashboard**. The vertical line appears on the graph at the finding timestamp.
+
+A single metric widget can carry one or more vertical annotations, but it cannot have both an alarm and annotations on the same widget. To keep this current without manual edits, automate step 3 with a Lambda function triggered by the Critical/High findings alarm that calls the CloudWatch PutDashboard API to inject the annotation at the finding timestamp.
 
 ### Building Logs Insights widgets on the dashboard
 
-The dashboard has three Logs Insights log widgets (findings by severity, recent new critical/high findings, and the critical/high finding trend) plus the metric overlay widget described above; there is no pie chart widget.
-
 1. Open your dashboard and choose **Add widget**.
-2. Pick the visualization (bar, table, or time series, matching the query).
+2. Pick the visualization (bar, pie, table, or time series).
 3. Select **Logs Insights** as the data source.
 4. Choose the security findings log group.
 5. Paste the matching query from `queries/logs-insights-queries.md`.
 6. Run it to confirm results, then choose **Create widget**.
-7. Repeat for each of the three queries.
+7. Repeat for each query.
 8. Choose **Save dashboard**.
 
-All three Logs Insights queries are also included in the dashboard definition in `templates/security-hub-cloudwatch.yaml`; the fourth widget on that dashboard is the CPU and security findings metric overlay, not a Logs Insights query.
+These queries are also built into the dashboard definitions in the templates. The three account-wide findings views are in the Security-Findings-Overview dashboard in `templates/security-hub-cloudwatch-foundation.yaml`; the resource-scoped findings table is in the correlation dashboard in `templates/security-hub-cloudwatch-per-resource.yaml`.
 
 ## Deploying the CloudFormation template
 
+Deploy the foundation stack once per account and Region:
+
 ```bash
 aws cloudformation deploy \
-  --template-file templates/security-hub-cloudwatch.yaml \
-  --stack-name security-hub-cloudwatch-ops \
-  --parameter-overrides \
-    FindingsLogGroupName=/aws/securityhub/findings \
-    MonitoredResourceArn=arn:aws:ec2:us-east-1:111122223333:instance/i-0abc123 \
-    MonitoredInstanceId=i-0abc123 \
-    CpuThreshold=90 \
-    P1EscalationSNSTopicArn=arn:aws:sns:us-east-1:111122223333:p1-escalation
+  --template-file templates/security-hub-cloudwatch-foundation.yaml \
+  --stack-name security-hub-cloudwatch-foundation \
+  --parameter-overrides FindingsLogGroupName=/aws/securityhub/findings
 ```
 
-This stack creates metric filters, alarms, a composite alarm, and a dashboard; it does not create IAM resources, so no capability flag is needed.
+Then deploy the per-resource stack once for each resource you page on, giving each deployment its own stack name and resource parameters:
 
-Parameters:
+```bash
+aws cloudformation deploy \
+  --template-file templates/security-hub-cloudwatch-per-resource.yaml \
+  --stack-name security-hub-cloudwatch-i-0abc123 \
+  --parameter-overrides \
+      FindingsLogGroupName=/aws/securityhub/findings \
+      MonitoredResourceArn=arn:aws:ec2:us-east-1:111122223333:instance/i-0abc123 \
+      MonitoredInstanceId=i-0abc123 \
+      CpuThreshold=90 \
+      P1EscalationSNSTopicArn=arn:aws:sns:us-east-1:111122223333:oncall-p1
+```
 
-- `FindingsLogGroupName`: name of the CloudWatch Logs log group where Security Hub CSPM findings are delivered. Confirm the actual name in your CloudWatch console before deploying; it defaults to `/aws/securityhub/findings`.
-- `MonitoredResourceArn`: the ASFF resource identifier to correlate on, exactly as it appears in the finding's `Resources[0].Id` field. This is the dimension value for the security-finding metric.
-- `MonitoredInstanceId`: the same resource in the form the performance metric uses, which for EC2 CPU is the short instance ID. ASFF keys the resource by ARN while the AWS/EC2 namespace keys it by InstanceId, so `MonitoredResourceArn` and `MonitoredInstanceId` are separate parameters that must refer to the same instance.
-- `CpuThreshold`: CPU utilization percent that trips the performance alarm. Defaults to 90.
-- `P1EscalationSNSTopicArn`: ARN of the SNS topic for the composite (P1) escalation. Must be in the same Region as the stack.
+Neither stack creates IAM resources, so no capability flag is needed. The per-resource stack names its composite alarm and correlation dashboard after the instance ID, so repeat deployments for different resources never collide. The foundation stack uses fixed names and is meant to exist only once per account and Region.
 
 Before applying `templates/iam-cloudops-read-only.json`, replace the `{region}` and `{account_id}` placeholders in the `Resource` ARNs with your own Region and account ID. If your findings log group uses a different name, update the ARN paths to match.
-
-### Account placement
-
-A composite alarm and its child alarms must all live in the same account and Region, so this template deploys the security-finding alarm, the performance alarm, and the composite alarm together in the workload account where the monitored instance runs and its findings are delivered. If you centralize findings in a separate observability account, replicate both the finding metric and the performance metric into that account and deploy this stack there instead.
 
 ## License
 

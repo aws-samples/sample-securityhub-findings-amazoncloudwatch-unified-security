@@ -11,13 +11,18 @@
         "logs:GetQueryResults",
         "logs:StopQuery",
         "logs:GetLogGroupFields",
-        "logs:DescribeLogGroups",
         "logs:DescribeLogStreams"
       ],
       "Resource": [
-        "arn:aws:logs:{region}:{account_id}:log-group:/aws/securityhub/findings:*",
-        "arn:aws:logs:{region}:{account_id}:log-group:/aws/securityhub/findings/*:*"
+        "arn:aws:logs:{region}:{account_id}:log-group:{findings_log_group_name}:*",
+        "arn:aws:logs:{region}:{account_id}:log-group:{findings_log_group_name}/*:*"
       ]
+    },
+    {
+      "Sid": "CloudOpsDescribeLogGroups",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "arn:aws:logs:{region}:{account_id}:log-group:*"
     }
   ]
 }

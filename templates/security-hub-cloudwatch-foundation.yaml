@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Security Hub CSPM findings in CloudWatch: FOUNDATION stack (account-wide).
+  Companion to the AWS Cloud Operations Blog post "Bring Security Hub findings
+  into your CloudWatch on-call workflow."
+
+  Deploy this stack ONCE per account and Region. It creates the account-wide
+  metric filters (crypto-mining and production-critical) that feed dashboards
+  and tuning, and that are not tied to a single monitored resource. Deploy the
+  companion per-resource stack (security-hub-cloudwatch-per-resource.yaml) once
+  for each resource you page on. Splitting the two avoids the collision that a
+  single combined stack would hit on a second deployment: the account-wide
+  filters and a fixed dashboard name can exist only once per account and Region.
+
+Parameters:
+  FindingsLogGroupName:
+    Type: String
+    Default: /aws/securityhub/findings
+    Description: >
+      Name of the CloudWatch Logs log group where Security Hub CSPM findings are
+      delivered. The managed log group name is set by the telemetry enablement
+      rule; confirm the actual name in your CloudWatch console before deploying.
+
+Resources:
+
+  # Account-wide finding-event filters (NEW/ACTIVE), no resource dimension, so
+  # they keep a DefaultValue for steady reporting. These feed the account-wide
+  # overview dashboard and are useful for tuning and trend views. They are not
+  # part of the per-resource composite correlation.
+  #
+  # CryptoMiningMetricFilter matches GuardDuty cryptocurrency findings as they
+  # appear in ASFF after the GuardDuty to Security Hub CSPM mapping. GuardDuty's
+  # native finding type is rewritten into the ASFF Types array, so the value seen
+  # in the log event is, for example:
+  #   "TTPs/Command and Control/CryptoCurrency:EC2-BitcoinTool.B"
+  #   "TTPs/Impact/Impact:Runtime-CryptoMinerExecuted"
+  #   "TTPs/Impact:EC2-BitcoinDomainRequest.Reputation"
+  # A single "*CryptoCurrency*" test catches the BitcoinTool command-and-control
+  # findings but misses CryptoMiner and BitcoinDomainRequest, which do not carry
+  # the literal "CryptoCurrency" substring. Matching both "*Crypto*" and
+  # "*Bitcoin*" on Types[0] covers the whole family. Types[0] is the first (and
+  # for these findings the only) element of the ASFF Types array.
+  CryptoMiningMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FindingsLogGroupName
+      FilterPattern: >-
+        { ($.Types[0] = "*Crypto*" || $.Types[0] = "*Bitcoin*")
+        && $.Workflow.Status = "NEW"
+        && $.RecordState = "ACTIVE" }
+      MetricTransformations:
+        - MetricName: CryptoMiningFindings
+          MetricNamespace: SecurityHub/Operational
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  ProductionCriticalFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FindingsLogGroupName
+      FilterPattern: >-
+        { ($.Severity.Label = "CRITICAL")
+        && ($.Resources[0].Tags.Environment = "Production")
+        && $.Workflow.Status = "NEW"
+        && $.RecordState = "ACTIVE" }
+      MetricTransformations:
+        - MetricName: ProductionCriticalFindings
+          MetricNamespace: SecurityHub/Operational
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  # Account-wide overview dashboard: the three findings views that are not tied to
+  # a single resource. The per-resource stack builds its own correlation dashboard
+  # (CPU overlaid with that resource's finding metric), named per instance so many
+  # per-resource deployments coexist. This account-wide dashboard has a fixed name
+  # and therefore belongs in the deploy-once foundation stack.
+  FindingsOverviewDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: Security-Findings-Overview
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "log",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter severity in ['CRITICAL','HIGH'] and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| sort @timestamp desc\n| limit 10",
+                "region": "${AWS::Region}",
+                "title": "Recent new critical/high findings",
+                "view": "table"
+              }
+            },
+            {
+              "type": "log",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| stats count(*) as total by Severity.Label\n| sort total desc",
+                "region": "${AWS::Region}",
+                "title": "Findings by severity",
+                "view": "bar"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0, "y": 6, "width": 24, "height": 6,
+              "properties": {
+                "query": "SOURCE '${FindingsLogGroupName}'\n| filter Severity.Label in ['CRITICAL','HIGH'] and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| stats count() as findings by bin(1h)",
+                "region": "${AWS::Region}",
+                "title": "Critical/high finding trend",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
