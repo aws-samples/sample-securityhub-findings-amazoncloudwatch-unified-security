@@ -1,3 +1,7 @@
+# Sample code, for illustration purposes only. Not intended for production use as is.
+# Review, test, and validate in a non-production environment, and work with your own
+# security, compliance, and legal teams before you deploy. Thresholds, names, account
+# IDs, and findings in this template are illustrative. Licensed under MIT-0.
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Security Hub CSPM findings in CloudWatch: FOUNDATION stack (account-wide).

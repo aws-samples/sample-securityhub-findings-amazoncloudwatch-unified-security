@@ -143,7 +143,15 @@ aws cloudformation deploy \
 
 Neither stack creates IAM resources, so no capability flag is needed. The per-resource stack names its composite alarm and correlation dashboard after the instance ID, so repeat deployments for different resources never collide. The foundation stack uses fixed names and is meant to exist only once per account and Region.
 
-Before applying `templates/iam-cloudops-read-only.json`, replace the `{region}` and `{account_id}` placeholders in the `Resource` ARNs with your own Region and account ID. If your findings log group uses a different name, update the ARN paths to match.
+Before applying `templates/iam-cloudops-read-only.json`, replace the `{region}`, `{account_id}`, and `{findings_log_group_name}` placeholders in the `Resource` ARNs with your own Region, account ID, and the name of the log group your enablement rule delivers findings to. The `logs:DescribeLogGroups` and `logs:StopQuery` actions do not support resource-level permissions, so they sit in a separate statement scoped to all log groups in the account and Region; the remaining actions stay scoped to the findings log group.
+
+## Disclaimer
+
+This repository contains sample code provided for illustration purposes only. The templates, policies, queries, and walkthroughs are examples and are not intended for production use as is. Review, test, and validate them in a non-production environment first, and work with your own security, compliance, and legal teams to meet your organization's requirements before you deploy any of it. The example thresholds, resource names, account IDs, and findings in this repository are illustrative and do not represent a real environment.
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
 ## License
 

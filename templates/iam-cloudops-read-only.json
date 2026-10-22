@@ -9,7 +9,6 @@
         "logs:FilterLogEvents",
         "logs:StartQuery",
         "logs:GetQueryResults",
-        "logs:StopQuery",
         "logs:GetLogGroupFields",
         "logs:DescribeLogStreams"
       ],
@@ -19,10 +18,13 @@
       ]
     },
     {
-      "Sid": "CloudOpsDescribeLogGroups",
+      "Sid": "CloudOpsAccountLevelReadActions",
       "Effect": "Allow",
-      "Action": "logs:DescribeLogGroups",
-      "Resource": "arn:aws:logs:{region}:{account_id}:log-group:*"
+      "Action": [
+        "logs:DescribeLogGroups",
+        "logs:StopQuery"
+      ],
+      "Resource": "*"
     }
   ]
 }

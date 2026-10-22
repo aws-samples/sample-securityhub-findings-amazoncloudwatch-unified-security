@@ -5,3 +5,4 @@
 .cursor/
 .kiro/
 .agents/
+detect-secrets-results.json
