@@ -2,62 +2,70 @@
 # Review, test, and validate in a non-production environment, and work with your own
 # security, compliance, and legal teams before you deploy. Thresholds, names, account
 # IDs, and findings in this template are illustrative. Licensed under MIT-0.
-AWSTemplateFormatVersion: '2010-09-09'
+#
+# Account and Region placement: a composite alarm and its child alarms must all live
+# in the same account and Region. This template creates the security-finding alarm,
+# the performance alarm, and the composite alarm together in the workload account
+# where the monitored instance runs and its findings are delivered. The instance ARN
+# used to match findings is built from the stack's own partition, Region, and account,
+# so deploy the stack in the account and Region where the instance runs.
+#
+# If you centralize findings in a separate observability account, note that Amazon
+# CloudWatch metrics centralization replicates custom, EMF, and OTLP metrics but not
+# AWS vended metrics such as AWS/EC2 CPUUtilization, and it adds the :@aws.account and
+# :@aws.region dimensions to centralized metrics. To run the composite in that account
+# you must first republish the performance metric there as a custom metric and account
+# for the added dimensions. The finding metric (a metric-filter custom metric) does
+# centralize. See the README for both options.
+AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Security Hub CSPM findings in CloudWatch: PER-RESOURCE stack. Companion to the
-  AWS Cloud Operations Blog post "Bring Security Hub findings into your CloudWatch
-  on-call workflow."
-
-  Deploy this stack once for EACH resource you page on. It creates the
-  per-resource finding metric filter, the security-finding alarm, the performance
-  alarm, the composite alarm, and a correlation dashboard whose name includes the
-  instance ID so repeat deployments do not collide. Deploy the foundation stack
-  (security-hub-cloudwatch-foundation.yaml) once per account and Region first for
-  the account-wide filters and overview dashboard.
-
-  Account and Region placement: a composite alarm and its child alarms must all
-  live in the same account and Region. This template creates the security-finding
-  alarm, the performance alarm, and the composite alarm together in the workload
-  account where the monitored resource runs and its findings are delivered. If you
-  centralize findings in a separate observability account, note that CloudWatch
-  metrics centralization replicates custom, EMF, and OTLP metrics but NOT AWS
-  vended metrics such as AWS/EC2 CPUUtilization, and it rewrites centralized
-  metrics with the :@aws.account and :@aws.region dimensions. To run the composite
-  in that account you must first republish the performance metric there as a
-  custom metric and account for the added dimensions. The finding metric (a
-  metric-filter custom metric) does centralize. See the README for both options.
+  AWS Security Hub CSPM findings in Amazon CloudWatch: PER-RESOURCE stack. Companion
+  to the AWS Cloud Operations Blog post "Bring Security Hub findings into your
+  CloudWatch on-call workflow." Deploy once for each Amazon EC2 instance you page on.
+  Creates a finding metric filter scoped to the instance, a security-finding alarm,
+  a performance alarm, a composite alarm, and a correlation dashboard named after the
+  instance ID. Deploy the foundation stack (security-hub-cloudwatch-foundation.yaml)
+  once per account and Region first.
 
 Parameters:
   FindingsLogGroupName:
     Type: String
     Default: /aws/securityhub/findings
+    AllowedPattern: ^[A-Za-z0-9._/#-]+$
+    MinLength: 1
+    MaxLength: 512
+    ConstraintDescription: >-
+      Must be 1 to 512 characters: letters, numbers, period, underscore, hyphen,
+      forward slash, or number sign.
     Description: >
-      Name of the CloudWatch Logs log group where Security Hub CSPM findings are
-      delivered. The managed log group name is set by the telemetry enablement
-      rule; confirm the actual name in your CloudWatch console before deploying.
-  MonitoredResourceArn:
-    Type: String
-    Description: >
-      The ASFF resource identifier to correlate on, exactly as it appears in the
-      finding's Resources[0].Id field (for an EC2 instance this is the full ARN,
-      for example arn:aws:ec2:us-east-1:111122223333:instance/i-0abc123). This is
-      the dimension value for the security-finding metric.
+      Name of the Amazon CloudWatch Logs log group where AWS Security Hub CSPM
+      findings are delivered. The telemetry enablement rule sets the managed log
+      group name; confirm the actual name in the CloudWatch console before deploying.
   MonitoredInstanceId:
     Type: String
+    AllowedPattern: ^i-([0-9a-f]{8}|[0-9a-f]{17})$
+    ConstraintDescription: >-
+      Must be an Amazon EC2 instance ID: i- followed by 8 or 17 lowercase
+      hexadecimal characters.
     Description: >
-      The same resource in the form the performance metric uses. For EC2 CPU this
-      is the short instance ID (for example i-0abc123). ASFF keys the resource by
-      ARN while the AWS/EC2 namespace keys it by InstanceId, so both forms are
-      taken as parameters and must refer to the same instance.
+      ID of the Amazon EC2 instance to monitor (for example i-0123456789abcdef0).
+      The performance alarm uses it as the InstanceId dimension, and the template
+      builds the instance ARN from it to match the Resources[0].Id field of
+      findings for the same instance.
   CpuThreshold:
     Type: Number
     Default: 90
-    Description: CPU utilization percent that trips the performance alarm.
+    MinValue: 0
+    MaxValue: 100
+    ConstraintDescription: Must be a percentage from 0 to 100.
+    Description: Amazon EC2 CPU utilization percent that trips the performance alarm.
   P1EscalationSNSTopicArn:
     Type: String
+    AllowedPattern: ^arn:aws[a-z-]*:sns:[a-z0-9-]+:[0-9]{12}:([A-Za-z0-9_-]{1,256}|[A-Za-z0-9_-]{1,251}[.]fifo)$
+    ConstraintDescription: Must be an Amazon SNS topic ARN.
     Description: >
-      ARN of the SNS topic for the composite (P1) escalation. Must be in the same
-      Region as this stack.
+      ARN of the Amazon SNS topic for the composite (P1) escalation. Must be in the
+      same Region as this stack.
 
 Resources:
 
@@ -70,9 +78,10 @@ Resources:
   #   lets a per-resource alarm exist. NOTE: a metric filter with Dimensions cannot
   #   also set DefaultValue, so this metric reports only when a matching finding
   #   arrives; the alarm below uses TreatMissingData: notBreaching to handle gaps.
-  # - The filter pattern is scoped to the single MonitoredResourceArn, so it emits
-  #   exactly one metric (ResourceId = the monitored ARN). This keeps it well under
-  #   the CloudWatch Logs limit that disables a metric filter after 1,000 distinct
+  # - The filter pattern is scoped to the single monitored instance ARN, built from
+  #   the stack's partition, Region, and account plus MonitoredInstanceId, so it
+  #   emits exactly one metric (ResourceId = that ARN). This keeps it well under the
+  #   CloudWatch Logs limit that disables a metric filter after 1,000 distinct
   #   dimension name/value pairs, and it bills as a single custom metric. Deploy one
   #   stack per resource you want to page on. Do not widen the pattern to all
   #   resources, which would reintroduce the high-cardinality self-disable risk.
@@ -84,7 +93,7 @@ Resources:
         { ($.Severity.Label = "CRITICAL" || $.Severity.Label = "HIGH")
         && $.Workflow.Status = "NEW"
         && $.RecordState = "ACTIVE"
-        && $.Resources[0].Id = "${MonitoredResourceArn}" }
+        && $.Resources[0].Id = "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${MonitoredInstanceId}" }
       MetricTransformations:
         - MetricName: CriticalHighSecurityFindings
           MetricNamespace: SecurityHub/Operational
@@ -106,14 +115,14 @@ Resources:
     Properties:
       AlarmName: !Sub "SecurityHub-CriticalHigh-${MonitoredInstanceId}"
       AlarmDescription: >-
-        CRITICAL or HIGH Security Hub CSPM finding on this resource. Confirm the
-        finding in the triage query before acting. Do not scale or restart until
-        root cause is understood.
+        CRITICAL or HIGH AWS Security Hub CSPM finding on this resource. Confirm
+        the finding in the triage query before acting. Do not scale or restart
+        until root cause is understood.
       Namespace: SecurityHub/Operational
       MetricName: CriticalHighSecurityFindings
       Dimensions:
         - Name: ResourceId
-          Value: !Ref MonitoredResourceArn
+          Value: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${MonitoredInstanceId}"
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 12
@@ -127,7 +136,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "EC2-CPUHigh-${MonitoredInstanceId}"
-      AlarmDescription: CPU utilization high on the monitored instance.
+      AlarmDescription: CPU utilization high on the monitored Amazon EC2 instance.
       Namespace: AWS/EC2
       MetricName: CPUUtilization
       Dimensions:
@@ -152,7 +161,8 @@ Resources:
         resource. Likely a security incident surfacing as a performance issue.
         Do not scale or restart. Isolate the resource and engage security incident
         response per your IR runbook.
-      AlarmRule: !Sub 'ALARM("${SecurityFindingAlarm}") AND ALARM("${PerformanceAlarm}")'
+      AlarmRule: !Sub >-
+        ALARM("${SecurityFindingAlarm}") AND ALARM("${PerformanceAlarm}")
       AlarmActions:
         - !Ref P1EscalationSNSTopicArn
       # OPTIONAL enhancement (CloudWatch alarm tags in action payloads, launched
@@ -176,13 +186,15 @@ Resources:
   # Per-resource correlation dashboard. The CPU widget overlays this resource's
   # finding metric on the right Y axis so a finding shows up on the same graph as
   # the CPU line, rather than relying on static vertical annotations. The name
-  # includes the instance ID so each per-resource deployment creates its own
-  # dashboard instead of colliding on a shared name. The account-wide findings
-  # views live on the Security-Findings-Overview dashboard in the foundation stack.
+  # includes the instance ID and the Region so each per-resource deployment creates
+  # its own dashboard instead of colliding on a shared name (CloudWatch dashboard
+  # names are unique per account across Regions, not per Region). The account-wide
+  # findings views live on the Security-Findings-Overview-<region> dashboard in the
+  # foundation stack.
   CorrelationDashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
-      DashboardName: !Sub "Unified-Security-Operations-${MonitoredInstanceId}"
+      DashboardName: !Sub "Unified-Security-Operations-${MonitoredInstanceId}-${AWS::Region}"
       DashboardBody: !Sub |
         {
           "widgets": [
@@ -192,7 +204,7 @@ Resources:
               "properties": {
                 "metrics": [
                   [ "AWS/EC2", "CPUUtilization", "InstanceId", "${MonitoredInstanceId}", { "yAxis": "left" } ],
-                  [ "SecurityHub/Operational", "CriticalHighSecurityFindings", "ResourceId", "${MonitoredResourceArn}", { "yAxis": "right", "stat": "Sum" } ]
+                  [ "SecurityHub/Operational", "CriticalHighSecurityFindings", "ResourceId", "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${MonitoredInstanceId}", { "yAxis": "right", "stat": "Sum" } ]
                 ],
                 "period": 60,
                 "stat": "Average",
@@ -205,7 +217,7 @@ Resources:
               "type": "log",
               "x": 0, "y": 6, "width": 24, "height": 6,
               "properties": {
-                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter resource = '${MonitoredResourceArn}' and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| sort @timestamp desc\n| limit 10",
+                "query": "SOURCE '${FindingsLogGroupName}'\n| fields @timestamp, Severity.Label as severity, Title, Resources.0.Id as resource\n| filter resource = 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${MonitoredInstanceId}' and Workflow.Status = 'NEW' and RecordState = 'ACTIVE'\n| sort @timestamp desc\n| limit 10",
                 "region": "${AWS::Region}",
                 "title": "New critical/high findings on this resource",
                 "view": "table"

@@ -17,7 +17,7 @@ LICENSE                           MIT-0 license
 The CloudFormation is split into two stacks so you can run more than one monitored
 resource without collisions. The foundation stack holds the account-wide pieces
 that can exist only once per account and Region (the crypto-mining and
-production-critical filters, and the Security-Findings-Overview dashboard). The
+production-critical filters, and the Security-Findings-Overview-<region> dashboard). The
 per-resource stack holds everything keyed to a single resource (the scoped metric
 filter, the security-finding alarm, the performance alarm, the composite alarm,
 and a correlation dashboard named per instance). Deploy the foundation once, then
@@ -114,7 +114,7 @@ A single metric widget can carry one or more vertical annotations, but it cannot
 7. Repeat for each query.
 8. Choose **Save dashboard**.
 
-These queries are also built into the dashboard definitions in the templates. The three account-wide findings views are in the Security-Findings-Overview dashboard in `templates/security-hub-cloudwatch-foundation.yaml`; the resource-scoped findings table is in the correlation dashboard in `templates/security-hub-cloudwatch-per-resource.yaml`.
+These queries are also built into the dashboard definitions in the templates. The three account-wide findings views are in the Security-Findings-Overview-<region> dashboard in `templates/security-hub-cloudwatch-foundation.yaml`; the resource-scoped findings table is in the correlation dashboard in `templates/security-hub-cloudwatch-per-resource.yaml`.
 
 ## Deploying the CloudFormation template
 
@@ -132,18 +132,19 @@ Then deploy the per-resource stack once for each resource you page on, giving ea
 ```bash
 aws cloudformation deploy \
   --template-file templates/security-hub-cloudwatch-per-resource.yaml \
-  --stack-name security-hub-cloudwatch-i-0abc123 \
+  --stack-name security-hub-cloudwatch-i-0123456789abcdef0 \
   --parameter-overrides \
       FindingsLogGroupName=/aws/securityhub/findings \
-      MonitoredResourceArn=arn:aws:ec2:us-east-1:111122223333:instance/i-0abc123 \
-      MonitoredInstanceId=i-0abc123 \
+      MonitoredInstanceId=i-0123456789abcdef0 \
       CpuThreshold=90 \
       P1EscalationSNSTopicArn=arn:aws:sns:us-east-1:111122223333:oncall-p1
 ```
 
 Neither stack creates IAM resources, so no capability flag is needed. The per-resource stack names its composite alarm and correlation dashboard after the instance ID, so repeat deployments for different resources never collide. The foundation stack uses fixed names and is meant to exist only once per account and Region.
 
-Before applying `templates/iam-cloudops-read-only.json`, replace the `{region}`, `{account_id}`, and `{findings_log_group_name}` placeholders in the `Resource` ARNs with your own Region, account ID, and the name of the log group your enablement rule delivers findings to. The `logs:DescribeLogGroups` and `logs:StopQuery` actions do not support resource-level permissions, so they sit in a separate statement scoped to all log groups in the account and Region; the remaining actions stay scoped to the findings log group.
+The per-resource stack builds the instance ARN that findings carry in `Resources[0].Id` from the instance ID and the stack's own partition, Region, and account (`arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/<instance-id>`), so deploy it in the account and Region where the instance runs. The parameters are validated at deploy time: the instance ID must be `i-` followed by 8 or 17 hexadecimal characters, `CpuThreshold` must be 0 to 100, and the topic must be an Amazon SNS topic ARN.
+
+Before applying `templates/iam-cloudops-read-only.json`, replace the `{region}`, `{account_id}`, and `{findings_log_group_name}` placeholders in the `Resource` ARNs with your own Region, account ID, and the name of the log group your enablement rule delivers findings to. The `logs:DescribeLogGroups` and `logs:StopQuery` actions do not support resource-level permissions, so they sit in a separate statement with `Resource` set to `*`; the remaining actions stay scoped to the findings log group.
 
 ## Disclaimer
 

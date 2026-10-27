@@ -2,11 +2,11 @@
 # Review, test, and validate in a non-production environment, and work with your own
 # security, compliance, and legal teams before you deploy. Thresholds, names, account
 # IDs, and findings in this template are illustrative. Licensed under MIT-0.
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Security Hub CSPM findings in CloudWatch: FOUNDATION stack (account-wide).
-  Companion to the AWS Cloud Operations Blog post "Bring Security Hub findings
-  into your CloudWatch on-call workflow."
+  AWS Security Hub CSPM findings in Amazon CloudWatch: FOUNDATION stack
+  (account-wide). Companion to the AWS Cloud Operations Blog post "Bring Security
+  Hub findings into your CloudWatch on-call workflow."
 
   Deploy this stack ONCE per account and Region. It creates the account-wide
   metric filters (crypto-mining and production-critical) that feed dashboards
@@ -20,10 +20,16 @@ Parameters:
   FindingsLogGroupName:
     Type: String
     Default: /aws/securityhub/findings
+    AllowedPattern: ^[A-Za-z0-9._/#-]+$
+    MinLength: 1
+    MaxLength: 512
+    ConstraintDescription: >-
+      Must be 1 to 512 characters: letters, numbers, period, underscore, hyphen,
+      forward slash, or number sign.
     Description: >
-      Name of the CloudWatch Logs log group where Security Hub CSPM findings are
-      delivered. The managed log group name is set by the telemetry enablement
-      rule; confirm the actual name in your CloudWatch console before deploying.
+      Name of the Amazon CloudWatch Logs log group where AWS Security Hub CSPM
+      findings are delivered. The telemetry enablement rule sets the managed log
+      group name; confirm the actual name in the CloudWatch console before deploying.
 
 Resources:
 
@@ -83,7 +89,7 @@ Resources:
   FindingsOverviewDashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
-      DashboardName: Security-Findings-Overview
+      DashboardName: !Sub "Security-Findings-Overview-${AWS::Region}"
       DashboardBody: !Sub |
         {
           "widgets": [

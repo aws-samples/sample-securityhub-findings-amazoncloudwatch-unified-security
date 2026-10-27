@@ -21,12 +21,12 @@ Use this when an alarm fires and you need immediate context: which resources hav
 
 ```
 fields @timestamp, Severity.Label as severity, Types.0 as findingType, Title
-| filter Resources.0.Id like /i-0abc123/
+| filter Resources.0.Id like /i-0123456789abcdef0/
 | sort @timestamp desc
 | limit 50
 ```
 
-Replace `i-0abc123` with the actual resource identifier from the alarm. This returns the full finding history for the resource under investigation, including updates, so it is intentionally not filtered to NEW. This is the query behind Pattern 2 (security context as first triage step) and Step 1 of the decision tree.
+Replace `i-0123456789abcdef0` with the actual resource identifier from the alarm. This returns the full finding history for the resource under investigation, including updates, so it is intentionally not filtered to NEW. This is the query behind Pattern 2 (security context as first triage step) and Step 1 of the decision tree.
 
 ## Finding volume by source (last 24 hours)
 
@@ -51,7 +51,7 @@ Surfaces which resource types have the most active compliance failures, so you c
 
 ## Dashboard widget queries
 
-The three Logs Insights queries below power the log widgets in the Security-Findings-Overview dashboard defined in `templates/security-hub-cloudwatch-foundation.yaml`. The per-resource correlation dashboard in `templates/security-hub-cloudwatch-per-resource.yaml` adds a metric widget that overlays the per-resource finding metric on the CPU graph (not a Logs Insights query) and a resource-scoped version of the recent-findings table.
+The three Logs Insights queries below power the log widgets in the Security-Findings-Overview-<region> dashboard defined in `templates/security-hub-cloudwatch-foundation.yaml`. The per-resource correlation dashboard in `templates/security-hub-cloudwatch-per-resource.yaml` adds a metric widget that overlays the per-resource finding metric on the CPU graph (not a Logs Insights query) and a resource-scoped version of the recent-findings table.
 
 **Findings by severity (bar chart):**
 ```
