@@ -1,4 +1,4 @@
-# Bring Security Hub Findings into Your CloudWatch On-Call Workflow
+# Bring Security Hub CSPM findings into your CloudWatch on-call workflow
 
 Companion resources for the AWS Cloud Operations Blog post. This repository contains the CloudFormation templates, IAM policies, Logs Insights queries, and console walkthroughs referenced in the blog.
 
