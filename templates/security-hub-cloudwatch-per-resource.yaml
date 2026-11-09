@@ -20,8 +20,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   AWS Security Hub CSPM findings in Amazon CloudWatch: PER-RESOURCE stack. Companion
-  to the AWS Cloud Operations Blog post "Bring Security Hub CSPM findings into your
-  CloudWatch on-call workflow." Deploy once for each Amazon EC2 instance you page on.
+  to the AWS Cloud Operations Blog post "Bring AWS Security Hub CSPM findings into
+  your Amazon CloudWatch on-call workflow." Deploy once for each Amazon EC2 instance
+  you page on.
   Creates a finding metric filter scoped to the instance, a security-finding alarm,
   a performance alarm, a composite alarm, and a correlation dashboard named after the
   instance ID. Deploy the foundation stack (security-hub-cloudwatch-foundation.yaml)

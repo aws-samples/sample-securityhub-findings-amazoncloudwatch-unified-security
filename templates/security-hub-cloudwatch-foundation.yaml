@@ -5,8 +5,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   AWS Security Hub CSPM findings in Amazon CloudWatch: FOUNDATION stack
-  (account-wide). Companion to the AWS Cloud Operations Blog post "Bring Security
-  Hub CSPM findings into your CloudWatch on-call workflow."
+  (account-wide). Companion to the AWS Cloud Operations Blog post "Bring AWS
+  Security Hub CSPM findings into your Amazon CloudWatch on-call workflow."
 
   Deploy this stack ONCE per account and Region. It creates the account-wide
   metric filters (crypto-mining and production-critical) that feed dashboards
